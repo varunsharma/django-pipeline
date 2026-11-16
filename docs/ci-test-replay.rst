@@ -36,9 +36,10 @@ groups and are still run unless an earlier failure stops the job.
 The ordered singleton Travis stages provide build-wide fail-fast: Travis
 cancels later stages after a failed stage, while normal Django cleanup for the
 failing job still runs. No branch-wide, commit-wide, or pull-request-wide
-cancellation is performed. The one-element Python matrix is intentional:
-Travis uses the explicit ``jobs.include`` rows as the complete matrix and does
-not add a default job.
+cancellation is performed. The empty default Python/environment row is
+explicitly excluded from the Travis matrix. Each included test job sets its
+Python version and tox lane, leaving only the staged test jobs in the build.
+See https://docs.travis-ci.com/user/build-matrix/ for matrix exclusion rules.
 
 Run the focused adapter checks with::
 

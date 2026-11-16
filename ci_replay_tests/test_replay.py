@@ -50,20 +50,26 @@ class ReplayHistoryTests(unittest.TestCase):
         with open(os.path.join(root, '.travis.yml')) as stream:
             config = stream.read()
         regex = __import__('re')
-        python_values = regex.findall(r'^  - "([^"]+)"$', config,
+        self.assertRegex(config, r'(?m)^env:\n  - ""$')
+        exclusions = regex.findall(
+            r'^  exclude:\n    - python: "([^"]+)"\n      env: ""$',
+            config, regex.MULTILINE)
+        self.assertEqual(['2.7'], exclusions)
+        python_values = regex.findall(r'^python:\n  - "([^"]+)"$', config,
                                       regex.MULTILINE)
+        self.assertEqual(['2.7'], python_values)
         stages = regex.findall(r'^  - name: ([^\s]+)$', config,
                                regex.MULTILINE)
         jobs = regex.findall(
-            r'^    - stage: ([^\s]+)\n      env: TOXENV=([^\s]+)$',
+            r'^    - stage: ([^\s]+)\n      python: "2.7"\n'
+            r'      env: TOXENV=([^\s]+)$',
             config, regex.MULTILINE)
-        # Travis defines the build entirely from include rows for a
-        # one-element language matrix; there is no implicit base job.
-        self.assertEqual(['2.7'], python_values)
+        expected = ('py26-1.6.X', 'py27-1.6.X', 'pypy-1.6.X', 'py33-1.6.X',
+                    'py27', 'pypy', 'py33')
+        self.assertEqual(expected, tuple(env for stage, env in jobs))
         self.assertEqual(7, len(stages))
-        self.assertEqual(7, len(jobs))
         self.assertEqual(stages, [stage for stage, env in jobs])
-        self.assertNotIn('{}', config)
+        self.assertEqual(len(jobs), len(set(stage for stage, env in jobs)))
 
     def test_skip_does_not_clear_previous_failure(self):
         test = SampleTest('test_skip')

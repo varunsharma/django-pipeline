@@ -1,6 +1,8 @@
 language: python
 python:
   - "2.7"
+env:
+  - ""
 
 cache:
   directories:
@@ -17,20 +19,30 @@ stages:
   - name: replay-06
   - name: replay-07
 jobs:
+  exclude:
+    - python: "2.7"
+      env: ""
   include:
     - stage: replay-01
+      python: "2.7"
       env: TOXENV=py26-1.6.X
     - stage: replay-02
+      python: "2.7"
       env: TOXENV=py27-1.6.X
     - stage: replay-03
+      python: "2.7"
       env: TOXENV=pypy-1.6.X
     - stage: replay-04
+      python: "2.7"
       env: TOXENV=py33-1.6.X
     - stage: replay-05
+      python: "2.7"
       env: TOXENV=py27
     - stage: replay-06
+      python: "2.7"
       env: TOXENV=pypy
     - stage: replay-07
+      python: "2.7"
       env: TOXENV=py33
 
 docsinstall: pip install -q tox
