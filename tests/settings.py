@@ -32,6 +32,7 @@ MIDDLEWARE_CLASSES = (
 )
 
 ROOT_URLCONF = 'tests.urls'
+TEST_RUNNER = 'ci_replay.ReplayDiscoverRunner'
 
 MIDDLEWARE_CLASSES = (
     'django.middleware.common.CommonMiddleware',

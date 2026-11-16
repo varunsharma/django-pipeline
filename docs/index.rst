@@ -17,6 +17,7 @@ Table Of Contents
    :maxdepth: 2
    
    installation
+   ci-test-replay
    configuration
    usage
    compressors
@@ -31,4 +32,3 @@ Indices and tables
 ==================
 
 * :ref:`search`
-
