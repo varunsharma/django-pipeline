@@ -45,6 +45,26 @@ class ReplayHistoryTests(unittest.TestCase):
         return ReplayTextTestResult(
             stream=io.StringIO(), descriptions=False, verbosity=0)
 
+    def test_travis_include_jobs_are_the_only_matrix_jobs(self):
+        root = os.path.dirname(os.path.dirname(__file__))
+        with open(os.path.join(root, '.travis.yml')) as stream:
+            config = stream.read()
+        regex = __import__('re')
+        python_values = regex.findall(r'^  - "([^"]+)"$', config,
+                                      regex.MULTILINE)
+        stages = regex.findall(r'^  - name: ([^\s]+)$', config,
+                               regex.MULTILINE)
+        jobs = regex.findall(
+            r'^    - stage: ([^\s]+)\n      env: TOXENV=([^\s]+)$',
+            config, regex.MULTILINE)
+        # Travis defines the build entirely from include rows for a
+        # one-element language matrix; there is no implicit base job.
+        self.assertEqual(['2.7'], python_values)
+        self.assertEqual(7, len(stages))
+        self.assertEqual(7, len(jobs))
+        self.assertEqual(stages, [stage for stage, env in jobs])
+        self.assertNotIn('{}', config)
+
     def test_skip_does_not_clear_previous_failure(self):
         test = SampleTest('test_skip')
         self.history.state['failed'] = [test.id()]
