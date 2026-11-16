@@ -6,14 +6,30 @@ cache:
 
 sudo: false
 
-env:
-  - TOXENV=py26-1.6.X
-  - TOXENV=py27-1.6.X
-  - TOXENV=pypy-1.6.X
-  - TOXENV=py33-1.6.X
-  - TOXENV=py27
-  - TOXENV=pypy
-  - TOXENV=py33
+stages:
+  - name: replay-01
+  - name: replay-02
+  - name: replay-03
+  - name: replay-04
+  - name: replay-05
+  - name: replay-06
+  - name: replay-07
+jobs:
+  include:
+    - stage: replay-01
+      env: TOXENV=py26-1.6.X
+    - stage: replay-02
+      env: TOXENV=py27-1.6.X
+    - stage: replay-03
+      env: TOXENV=pypy-1.6.X
+    - stage: replay-04
+      env: TOXENV=py33-1.6.X
+    - stage: replay-05
+      env: TOXENV=py27
+    - stage: replay-06
+      env: TOXENV=pypy
+    - stage: replay-07
+      env: TOXENV=py33
 
 docsinstall: pip install -q tox
 
