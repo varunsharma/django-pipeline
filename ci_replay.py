@@ -48,29 +48,60 @@ def _git(*args):
 
 def _context():
     env = os.environ
-    branch = (env.get('CI_REPLAY_BRANCH') or env.get('TRAVIS_PULL_REQUEST_BRANCH')
-              or env.get('BRANCH_NAME') or env.get('GIT_BRANCH')
-              or env.get('TRAVIS_BRANCH') or env.get('GITHUB_HEAD_REF')
-              or env.get('GITHUB_REF_NAME') or env.get('CI_COMMIT_REF_NAME')
-              or _git('rev-parse', '--abbrev-ref', 'HEAD') or '')
     ref = env.get('GITHUB_REF', '')
     pr = (env.get('CI_REPLAY_PR') or env.get('CHANGE_ID') or
           env.get('TRAVIS_PULL_REQUEST') or env.get('CI_MERGE_REQUEST_IID'))
+    if pr in ('false', '0'):
+        pr = ''
     if not pr and ref.startswith('refs/pull/'):
         pr = ref.split('/')[2]
+    branch = (env.get('CI_REPLAY_HEAD_REF') or env.get('CI_REPLAY_BRANCH') or
+              env.get('GITHUB_HEAD_REF') or
+              env.get('TRAVIS_PULL_REQUEST_BRANCH') or
+              env.get('CI_MERGE_REQUEST_SOURCE_BRANCH_NAME') or
+              env.get('BRANCH_NAME') or env.get('GIT_BRANCH') or
+              env.get('TRAVIS_BRANCH') or env.get('GITHUB_REF_NAME') or
+              env.get('CI_COMMIT_REF_NAME') or
+              _git('rev-parse', '--abbrev-ref', 'HEAD') or '')
+    base_ref = (env.get('CI_REPLAY_BASE_REF') or env.get('GITHUB_BASE_REF') or
+                env.get('CI_MERGE_REQUEST_TARGET_BRANCH_NAME') or
+                (env.get('TRAVIS_BRANCH') if pr else '') or branch)
+    sha = (env.get('CI_REPLAY_SHA') or env.get('TRAVIS_COMMIT') or
+           env.get('GITHUB_SHA') or env.get('CI_COMMIT_SHA') or
+           _git('rev-parse', 'HEAD') or '')
+    head_sha = (env.get('CI_REPLAY_HEAD_SHA') or
+                env.get('TRAVIS_PULL_REQUEST_SHA') or
+                env.get('GITHUB_SHA') or env.get('CI_COMMIT_SHA') or sha)
+    base_sha = (env.get('CI_REPLAY_BASE_SHA') or
+                env.get('CI_MERGE_REQUEST_DIFF_BASE_SHA') or '')
+    if not base_sha and base_ref and re.match(r'^[A-Za-z0-9._/-]+$', base_ref):
+        base_sha = (_git('rev-parse', '--verify',
+                         'refs/remotes/origin/' + base_ref + '^{commit}') or '')
+    run_id = (env.get('CI_REPLAY_RUN_ID') or env.get('TRAVIS_BUILD_ID') or
+              env.get('GITHUB_RUN_ID') or env.get('BUILD_TAG') or
+              env.get('BUILD_NUMBER') or env.get('CI_PIPELINE_ID') or '')
+    run_attempt = (env.get('CI_REPLAY_RUN_ATTEMPT') or
+                   env.get('GITHUB_RUN_ATTEMPT') or env.get('CI_JOB_RETRY') or '')
+    job_id = (env.get('CI_REPLAY_JOB_ID') or env.get('TRAVIS_JOB_ID') or
+              env.get('GITHUB_JOB') or env.get('JOB_NAME') or
+              env.get('CI_JOB_ID') or '')
     values = {
-        'repository': env.get('CI_REPLAY_REPOSITORY') or
+        'repository': (env.get('CI_REPLAY_REPOSITORY') or
                       env.get('TRAVIS_REPO_SLUG') or env.get('GITHUB_REPOSITORY')
-                      or env.get('CI_PROJECT_PATH') or '',
+                      or env.get('CI_PROJECT_PATH') or ''),
         'branch': branch,
         'pr': pr or '',
-        'sha': _git('rev-parse', 'HEAD') or '',
-        'run': env.get('TRAVIS_BUILD_ID') or env.get('GITHUB_RUN_ID')
-               or env.get('BUILD_TAG') or env.get('BUILD_NUMBER')
-               or env.get('CI_PIPELINE_ID') or '',
-        'job': env.get('TRAVIS_JOB_ID') or env.get('GITHUB_JOB')
-               or env.get('JOB_NAME')
-               or env.get('CI_JOB_ID') or '',
+        'pr_number': pr or '',
+        'head_ref': branch,
+        'base_ref': base_ref,
+        'sha': sha,
+        'head_sha': head_sha,
+        'base_sha': base_sha,
+        'run': run_id,
+        'run_id': run_id,
+        'run_attempt': run_attempt,
+        'job': job_id,
+        'job_id': job_id,
         'lane': (env.get('CI_REPLAY_LANE') or env.get('TOX_ENV_NAME') or
                  env.get('TOX_ENV') or env.get('TOXENV') or 'default'),
         'python': platform.python_version(),
@@ -82,13 +113,13 @@ class ReplayHistory(object):
     def __init__(self, directory=None):
         self.context = _context()
         scope = [self.context[key] for key in
-                 ('repository', 'branch', 'lane', 'python')]
+                 ('repository', 'branch', 'pr_number', 'head_ref', 'lane', 'python')]
         digest = hashlib.sha256(json.dumps(scope).encode('utf-8')).hexdigest()[:32]
         self.directory = os.path.abspath(directory or
                                          os.environ.get('CI_REPLAY_CACHE_DIR', '.ci-replay-cache'))
         self.path = os.path.join(self.directory, digest + '.json')
-        self.state = {'version': 1, 'failed': [], 'pending': [],
-                      'risk': {}, 'contexts': []}
+        self.state = {'version': 2, 'failed': [], 'pending': [],
+                      'risk': {}, 'contexts': [], 'provenance': {}}
         self.checkpoint_disabled = False
         if os.path.islink(self.directory) or os.path.islink(self.path):
             self.checkpoint_disabled = True
@@ -97,8 +128,8 @@ class ReplayHistory(object):
                 self._load()
             except ValueError:
                 # Cache data is advisory. An invalid file starts a cold run.
-                self.state = {'version': 1, 'failed': [], 'pending': [],
-                              'risk': {}, 'contexts': []}
+                self.state = {'version': 2, 'failed': [], 'pending': [],
+                      'risk': {}, 'contexts': [], 'provenance': {}}
         self.previous_sha = (self.state['contexts'][-1].get('sha', '')
                              if self.state['contexts'] else '')
         self.state['contexts'] = (self.state['contexts'] + [self.context])[-12:]
@@ -110,13 +141,20 @@ class ReplayHistory(object):
                 all(isinstance(item, type(u'')) and len(item) <= 2000
                     for item in value))
 
+    def _valid_context(self, value):
+        fields = ('repository', 'pr_number', 'head_ref', 'base_ref', 'base_sha',
+                  'sha', 'head_sha', 'run_id', 'run_attempt', 'job_id')
+        return (isinstance(value, dict) and
+                all(isinstance(value.get(key), type(u'')) and
+                    len(value[key]) <= 400 for key in fields))
+
     def _load(self):
         try:
             if os.path.getsize(self.path) > MAX_BYTES:
                 raise ValueError('oversized state')
             with open(self.path) as stream:
                 value = json.load(stream)
-            if (not isinstance(value, dict) or value.get('version') != 1 or
+            if (not isinstance(value, dict) or value.get('version') != 2 or
                     not self._valid_ids(value.get('failed')) or
                     not self._valid_ids(value.get('pending')) or
                     not isinstance(value.get('risk'), dict) or
@@ -128,7 +166,12 @@ class ReplayHistory(object):
                     len(value['contexts']) > 12 or
                     not all(isinstance(item, dict) and
                             isinstance(item.get('sha', ''), type(u''))
-                            for item in value['contexts'])):
+                            for item in value['contexts']) or
+                    not isinstance(value.get('provenance'), dict) or
+                    len(value['provenance']) > MAX_TESTS or
+                    not self._valid_ids(list(value['provenance'])) or
+                    not all(self._valid_context(item)
+                            for item in value['provenance'].values())):
                 raise ValueError('invalid schema')
             self.state = value
         except (ValueError, TypeError, AttributeError, IOError, OSError) as exc:
@@ -140,7 +183,8 @@ class ReplayHistory(object):
             return
         if (len(self.state['failed']) > MAX_TESTS or
                 len(self.state['pending']) > MAX_TESTS or
-                len(self.state['risk']) > MAX_TESTS):
+                len(self.state['risk']) > MAX_TESTS or
+                len(self.state['provenance']) > MAX_TESTS):
             self.checkpoint_disabled = True
             return
         try:
@@ -206,6 +250,29 @@ class ReplayHistory(object):
         return bool(candidates.intersection(changed))
 
     def order(self, tests):
+        identifiers = set(test.id() for test in tests)
+        discovered_modules = set(test.__class__.__module__ for test in tests)
+        collection_prefix = 'unittest.loader._FailedTest.'
+        prior = set(self.state['failed'] + self.state['pending'] +
+                    list(self.state['provenance']))
+        resolved = []
+        for identifier in prior:
+            if not identifier.startswith(collection_prefix) or identifier in identifiers:
+                continue
+            module = identifier[len(collection_prefix):]
+            if any(name == module or name.startswith(module + '.')
+                   for name in discovered_modules):
+                resolved.append(identifier)
+        if resolved:
+            resolved = set(resolved)
+            self.state['failed'] = [item for item in self.state['failed']
+                                    if item not in resolved]
+            self.state['pending'] = [item for item in self.state['pending']
+                                     if item not in resolved]
+            for identifier in resolved:
+                self.state['provenance'].pop(identifier, None)
+                self.state['risk'].pop(identifier, None)
+
         failed, pending = set(self.state['failed']), set(self.state['pending'])
         risk = self.state['risk']
         changed = self._changed_files()
@@ -256,6 +323,8 @@ class ReplayHistory(object):
                 pending_ids.append(identifier)
                 seen.add(identifier)
         self.state['pending'] = pending_ids
+        for identifier in pending_ids:
+            self.state['provenance'].setdefault(identifier, self.context)
         self.save()
         return tests
 
@@ -265,6 +334,7 @@ class ReplayHistory(object):
         self.failed_this_run.add(identifier)
         if identifier not in self.state['failed']:
             self.state['failed'].append(identifier)
+        self.state['provenance'].setdefault(identifier, self.context)
         if first_error:
             self.state['risk'][identifier] = min(
                 1000000, self.state['risk'].get(identifier, 0) + 1)
@@ -278,6 +348,7 @@ class ReplayHistory(object):
             self.passed_tests.add(identifier)
             self.state['failed'] = [item for item in self.state['failed']
                                     if item != identifier]
+            self.state['provenance'].pop(identifier, None)
         self.save()
 
 
@@ -285,9 +356,12 @@ class ReplayTextTestResult(unittest.TextTestResult):
     history = None
 
     def startTest(self, test):
-        self._test_errors = set()
-        self._passed_tests = {}
-        self._failed_classes = set()
+        if not hasattr(self, '_test_errors'):
+            self._test_errors = set()
+        if not hasattr(self, '_passed_tests'):
+            self._passed_tests = {}
+        if not hasattr(self, '_failed_classes'):
+            self._failed_classes = set()
         unittest.TextTestResult.startTest(self, test)
 
     def _mark_class_error(self, test):
@@ -326,13 +400,31 @@ class ReplayTextTestResult(unittest.TextTestResult):
         return unittest.TextTestResult.addSuccess(self, test)
 
     def finalize_history(self):
+        passed_classes = set()
         for test, class_name in self._passed_tests.values():
+            passed_classes.add(class_name)
             short_name = class_name.rsplit('.', 1)[-1]
             class_failed = any(
                 failed == class_name or failed.endswith('.' + short_name)
                 for failed in self._failed_classes)
             if not class_failed:
                 self.history.complete(test, passed=True)
+        holder_pattern = re.compile(r'^(?:setUpClass|tearDownClass) \(([^)]+)\)$')
+        resolved = []
+        for identifier in self.history.state['failed']:
+            match = holder_pattern.match(identifier)
+            if (match and match.group(1) in passed_classes and
+                    match.group(1) not in self._failed_classes):
+                resolved.append(identifier)
+        for identifier in resolved:
+            self.history.state['failed'].remove(identifier)
+            self.history.state['pending'] = [
+                item for item in self.history.state['pending']
+                if item != identifier]
+            self.history.state['provenance'].pop(identifier, None)
+            self.history.state['risk'].pop(identifier, None)
+        if resolved:
+            self.history.save()
 
     def addSkip(self, test, reason):
         self.history.complete(test)

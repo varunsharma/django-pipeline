@@ -89,6 +89,50 @@ class ReplayHistoryTests(unittest.TestCase):
         self.assertEqual([], self.history.state['failed'])
         self.assertEqual([], self.history.state['pending'])
 
+    def test_all_clean_methods_clear_prior_failures_for_class(self):
+        class PreviouslyFailed(unittest.TestCase):
+            def test_first(self):
+                pass
+
+            def test_second(self):
+                pass
+
+        tests = [PreviouslyFailed('test_first'),
+                 PreviouslyFailed('test_second')]
+        self.history.state['failed'] = [test.id() for test in tests]
+        self.history.state['provenance'] = dict(
+            (test.id(), self.history.context) for test in tests)
+        self.history.save()
+        reloaded = ReplayHistory()
+        ordered = reloaded.order(tests)
+        runner = ReplayTextTestRunner(
+            stream=io.StringIO(), descriptions=False, verbosity=0,
+            replay_history=reloaded)
+
+        runner.run(unittest.TestSuite(ordered))
+
+        self.assertEqual([], reloaded.state['failed'])
+        self.assertEqual({}, reloaded.state['provenance'])
+
+    def test_clean_class_run_resolves_prior_class_fixture_holder(self):
+        class RecoveredFixture(unittest.TestCase):
+            def test_recovered(self):
+                pass
+
+        holder = 'setUpClass (%s.RecoveredFixture)' % __name__
+        self.history.state['failed'] = [holder]
+        self.history.state['provenance'][holder] = self.history.context
+        self.history.save()
+        test = RecoveredFixture('test_recovered')
+        runner = ReplayTextTestRunner(
+            stream=io.StringIO(), descriptions=False, verbosity=0,
+            replay_history=self.history)
+
+        runner.run(unittest.TestSuite([test]))
+
+        self.assertNotIn(holder, self.history.state['failed'])
+        self.assertNotIn(holder, self.history.state['provenance'])
+
     def test_call_success_after_teardown_error_does_not_clear_failure(self):
         test = SampleTest('test_pass')
         result = self._result()
@@ -279,6 +323,27 @@ class ReplayHistoryTests(unittest.TestCase):
         self.assertEqual(1, result.testsRun)
         self.assertIn(collection_error.id(), self.history.state['failed'])
 
+    def test_resolved_collection_error_clears_when_module_is_discovered(self):
+        module_name = '_missing_ci_replay_test_module'
+        collection_error = list(
+            unittest.TestLoader().loadTestsFromName(module_name))[0]
+        self.history.order([collection_error])
+        self.history.error(collection_error)
+
+        class RecoveredTest(unittest.TestCase):
+            def test_recovered(self):
+                pass
+
+        RecoveredTest.__module__ = module_name
+        recovered = RecoveredTest('test_recovered')
+        next_history = ReplayHistory()
+        next_history.order([recovered])
+
+        self.assertNotIn(collection_error.id(), next_history.state['failed'])
+        self.assertNotIn(collection_error.id(), next_history.state['pending'])
+        self.assertNotIn(collection_error.id(),
+                         next_history.state['provenance'])
+
     def test_repository_and_lane_are_part_of_cache_scope(self):
         previous_repository = os.environ.get('CI_REPLAY_REPOSITORY')
         previous_lane = os.environ.get('CI_REPLAY_LANE')
@@ -330,6 +395,84 @@ class ReplayHistoryTests(unittest.TestCase):
                 else:
                     os.environ[name] = value
 
+    def test_unresolved_failure_keeps_origin_context_across_runs_until_pass(self):
+        names = ('CI_REPLAY_REPOSITORY', 'CI_REPLAY_PR', 'CI_REPLAY_HEAD_REF',
+                 'CI_REPLAY_BASE_REF', 'CI_REPLAY_BASE_SHA', 'CI_REPLAY_HEAD_SHA',
+                 'CI_REPLAY_SHA', 'CI_REPLAY_RUN_ID',
+                 'CI_REPLAY_RUN_ATTEMPT', 'CI_REPLAY_JOB_ID')
+        previous = dict((name, os.environ.get(name)) for name in names)
+        try:
+            os.environ.update({
+                'CI_REPLAY_REPOSITORY': 'owner/project',
+                'CI_REPLAY_PR': '4242',
+                'CI_REPLAY_HEAD_REF': 'feature/provenance',
+                'CI_REPLAY_BASE_REF': 'master',
+                'CI_REPLAY_BASE_SHA': 'a' * 40,
+                'CI_REPLAY_HEAD_SHA': 'b' * 40,
+                'CI_REPLAY_SHA': 'c' * 40,
+                'CI_REPLAY_RUN_ID': 'run-1',
+                'CI_REPLAY_RUN_ATTEMPT': '1',
+                'CI_REPLAY_JOB_ID': 'job-1',
+            })
+            test = SampleTest('test_pass')
+            history = ReplayHistory()
+            history.order([test])
+            history.error(test)
+            origin = dict(history.state['provenance'][test.id()])
+            self.assertEqual('4242', origin['pr_number'])
+            self.assertEqual('feature/provenance', origin['head_ref'])
+            self.assertEqual('master', origin['base_ref'])
+            self.assertEqual('a' * 40, origin['base_sha'])
+            self.assertEqual('b' * 40, origin['head_sha'])
+            self.assertEqual('c' * 40, origin['sha'])
+            self.assertEqual('run-1', origin['run_id'])
+            self.assertEqual('1', origin['run_attempt'])
+            self.assertEqual('job-1', origin['job_id'])
+
+            for attempt in range(2, 18):
+                os.environ['CI_REPLAY_RUN_ID'] = 'run-%d' % attempt
+                os.environ['CI_REPLAY_RUN_ATTEMPT'] = str(attempt)
+                os.environ['CI_REPLAY_JOB_ID'] = 'job-%d' % attempt
+                history = ReplayHistory()
+                history.order([test])
+                history.error(test)
+                self.assertEqual(origin, history.state['provenance'][test.id()])
+            self.assertLessEqual(len(history.state['contexts']), 12)
+
+            # A later clean invocation has fresh per-run failure tracking.
+            history = ReplayHistory()
+            history.order([test])
+            runner = ReplayTextTestRunner(
+                stream=io.StringIO(), descriptions=False, verbosity=0,
+                replay_history=history)
+            runner.run(unittest.TestSuite([test]))
+            self.assertNotIn(test.id(), history.state['provenance'])
+            self.assertNotIn(test.id(), history.state['failed'])
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+    def test_pull_request_is_part_of_cache_scope(self):
+        names = ('CI_REPLAY_REPOSITORY', 'CI_REPLAY_HEAD_REF', 'CI_REPLAY_PR')
+        previous = dict((name, os.environ.get(name)) for name in names)
+        try:
+            os.environ['CI_REPLAY_REPOSITORY'] = 'owner/project'
+            os.environ['CI_REPLAY_HEAD_REF'] = 'feature/shared-name'
+            os.environ['CI_REPLAY_PR'] = '41'
+            first = ReplayHistory()
+            os.environ['CI_REPLAY_PR'] = '42'
+            second = ReplayHistory()
+            self.assertNotEqual(first.path, second.path)
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
     def test_invalid_cache_falls_back_to_cold_history(self):
         self.history.save()
         with open(self.history.path, 'w') as stream:
@@ -337,9 +480,12 @@ class ReplayHistoryTests(unittest.TestCase):
 
         cold_history = ReplayHistory()
         self.assertEqual([], cold_history.state['failed'])
-        cold_history.order([SampleTest('test_pass')])
+        candidates = [SampleTest('test_pass'), SampleTest('test_skip')]
+        ordered = cold_history.order(candidates)
+        self.assertEqual([item.id() for item in candidates],
+                         [item.id() for item in ordered])
         with open(cold_history.path) as stream:
-            self.assertEqual(1, __import__('json').load(stream)['version'])
+            self.assertEqual(2, __import__('json').load(stream)['version'])
 
     def test_symlinked_cache_is_ignored_without_following_it(self):
         self.history.save()
